@@ -660,6 +660,9 @@ export default function App() {
           <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: COLORS.textDim }}>
             монеты — за выполненные задачи
           </div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 9, color: COLORS.rust, marginTop: 2, wordBreak: "break-all" }}>
+            DEBUG backend: {BACKEND_URL ? BACKEND_URL : "(не задан!)"}
+          </div>
         </div>
         <button
           onClick={() => setIdentitySheetOpen(true)}
