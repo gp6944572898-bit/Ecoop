@@ -54,6 +54,13 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def safe_data(res):
+    """maybe_single().execute() returns None (not a response object) when no
+    row matches, depending on the supabase-py version — accessing .data on
+    that None crashes. This normalizes both cases to "no data"."""
+    return res.data if res is not None else None
+
+
 def js_number(x: Any) -> Any:
     """JS has one numeric type: Number(50.0) is just 50, and JSON.stringify(50)
     gives "50" — never "50.0". Postgres numeric/JSONB can round-trip a Python
@@ -132,7 +139,7 @@ def submit_solution(body: SubmitSolutionBody):
         .maybe_single()
         .execute()
     )
-    if not participant_res.data:
+    if not safe_data(participant_res):
         raise HTTPException(status_code=403, detail="Address is not a project participant")
 
     supabase.table("submissions").update({"is_active": False}).eq("task_id", body.taskId).eq(
@@ -181,7 +188,7 @@ def cast_vote(body: CastVoteBody):
         .maybe_single()
         .execute()
     )
-    submission = submission_res.data
+    submission = safe_data(submission_res)
     if not submission:
         raise HTTPException(status_code=409, detail="No active submission")
     if submission["address"] == body.address:
@@ -195,7 +202,7 @@ def cast_vote(body: CastVoteBody):
         .maybe_single()
         .execute()
     )
-    if not participant_res.data:
+    if not safe_data(participant_res):
         raise HTTPException(status_code=403, detail="Not a project participant")
 
     existing_vote_res = (
@@ -206,7 +213,7 @@ def cast_vote(body: CastVoteBody):
         .maybe_single()
         .execute()
     )
-    if existing_vote_res.data:
+    if safe_data(existing_vote_res):
         raise HTTPException(status_code=409, detail="Already voted")
 
     supabase.table("votes").insert(
@@ -240,7 +247,7 @@ def cast_vote(body: CastVoteBody):
         last_block_res = (
             supabase.table("chain_blocks").select("*").order("index", desc=True).limit(1).maybe_single().execute()
         )
-        last_block = last_block_res.data
+        last_block = safe_data(last_block_res)
         new_index = (last_block["index"] + 1) if last_block else 0
         previous_hash = last_block["hash"] if last_block else "0" * 64
         timestamp = int(time.time() * 1000)
