@@ -14,25 +14,29 @@ import {
   ShieldAlert,
   Copy,
   Coins,
+  CheckCircle2,
+  Pencil,
+  Trash2,
+  History,
 } from "lucide-react";
 
-// ---------- palette / tokens ----------
+// ---------- palette / tokens (тёмная минималистичная тема) ----------
 const COLORS = {
-  bg: "#0B1220",
-  surface: "#131B2E",
-  surfaceRaised: "#1A2438",
-  border: "#25314A",
-  text: "#E7ECF5",
-  textDim: "#8C9AB5",
-  gold: "#E3A836",
-  goldDim: "#8A6A2A",
-  sage: "#6FA287",
-  rust: "#C1544C",
-  ink: "#0B1220",
+  bg: "#0E1621",
+  surface: "#17212B",
+  surfaceRaised: "#242F3D",
+  border: "#2B3A48",
+  text: "#FFFFFF",
+  textDim: "#8B98A5",
+  gold: "#2AABEE", // основной акцент — синий, как в Telegram
+  goldDim: "#1C5F80",
+  sage: "#4FAE4E",
+  rust: "#E05353",
+  ink: "#FFFFFF", // текст на акцентных кнопках — теперь белый (фон синий)
 };
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap');
 `;
 
 // ---------- storage keys ----------
@@ -85,7 +89,7 @@ async function loadProjects() {
 async function loadTasks() {
   const [{ data: tasks, error: tErr }, { data: submissions, error: sErr }, { data: votes, error: vErr }] =
     await Promise.all([
-      supabase.from("tasks").select("id,project_id,title,description,reward,status,created_at"),
+      supabase.from("tasks").select("id,project_id,title,description,reward,status,created_by,created_at"),
       supabase.from("submissions").select("*").eq("is_active", true),
       supabase.from("votes").select("*"),
     ]);
@@ -107,6 +111,7 @@ async function loadTasks() {
       description: t.description || "",
       reward: Number(t.reward),
       status: t.status,
+      createdBy: t.created_by,
       createdAt: new Date(t.created_at).getTime(),
       submission: sub
         ? { taskId: t.id, address: sub.address, text: sub.text_body, submittedAt: sub.submitted_at, signature: sub.signature }
@@ -139,6 +144,35 @@ async function loadChain() {
   }));
 }
 
+// ---------- activity log: best-effort audit trail, not security-critical ----------
+async function loadActivityLog(projectId) {
+  const { data, error } = await supabase
+    .from("activity_log")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+  if (error) {
+    console.error("loadActivityLog failed", error);
+    return [];
+  }
+  return (data || []).map((r) => ({
+    id: r.id,
+    address: r.address,
+    action: r.action,
+    details: r.details || {},
+    createdAt: new Date(r.created_at).getTime(),
+  }));
+}
+
+async function logActivity(projectId, address, action, details) {
+  try {
+    await supabase.from("activity_log").insert({ project_id: projectId, address, action, details: details || {} });
+  } catch (e) {
+    console.error("logActivity failed", e);
+  }
+}
+
 // ---------- crypto / hashing helpers ----------
 async function sha256Hex(str) {
   const enc = new TextEncoder().encode(str);
@@ -162,9 +196,6 @@ function hexToBuf(hex) {
 
 const EC_PARAMS = { name: "ECDSA", namedCurve: "P-256" };
 
-// Generates a real ECDSA (P-256) keypair. The address IS the hex-encoded
-// public key, so anyone can verify a signature just from the address —
-// no separate "lookup" needed, same principle as Bitcoin/Ethereum addresses.
 async function generateKeyPair() {
   const keyPair = await crypto.subtle.generateKey(EC_PARAMS, true, ["sign", "verify"]);
   const pubRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
@@ -180,7 +211,6 @@ async function importPublicKeyFromAddress(address) {
   return crypto.subtle.importKey("raw", hexToBuf(address), EC_PARAMS, true, ["verify"]);
 }
 
-// Signs a plain object payload with an identity's private key (JWK form).
 async function signPayload(privateJwk, payloadObj) {
   const key = await importPrivateKey(privateJwk);
   const data = new TextEncoder().encode(JSON.stringify(payloadObj));
@@ -188,7 +218,6 @@ async function signPayload(privateJwk, payloadObj) {
   return bufToHex(sig);
 }
 
-// Verifies a signature against the payload and the signer's address (public key).
 async function verifyPayload(address, payloadObj, signatureHex) {
   try {
     const key = await importPublicKeyFromAddress(address);
@@ -199,17 +228,11 @@ async function verifyPayload(address, payloadObj, signatureHex) {
   }
 }
 
-// Strips the "signature" field off a signed record, leaving the exact
-// payload shape that was originally signed (for re-verification).
 function payloadOf(signed) {
   const { signature, ...payload } = signed;
   return payload;
 }
 
-// ---------- security-critical writes go through the Python backend, not
-// direct table inserts: it re-verifies the ECDSA signature server-side and,
-// for votes, recomputes the tally from the database itself before minting
-// any reward — the browser can no longer fabricate an approval. ----------
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
 async function callBackend(path, body) {
@@ -295,7 +318,7 @@ function Sheet({ open, onClose, title, children }) {
           }}
         />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 17, color: COLORS.text }}>
+          <span style={{ fontFamily: "'Inter',sans-serif", fontWeight: 600, fontSize: 17, color: COLORS.text }}>
             {title}
           </span>
           <button onClick={onClose} style={iconBtnStyle}>
@@ -321,7 +344,7 @@ const iconBtnStyle = {
 function Field({ label, children }) {
   return (
     <div style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 6, fontFamily: "'IBM Plex Mono',monospace" }}>
+      <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 6, fontFamily: "'Roboto Mono',monospace" }}>
         {label}
       </div>
       {children}
@@ -337,7 +360,7 @@ const inputStyle = {
   padding: "11px 12px",
   color: COLORS.text,
   fontSize: 15,
-  fontFamily: "'Space Grotesk',sans-serif",
+  fontFamily: "'Inter',sans-serif",
   outline: "none",
   boxSizing: "border-box",
 };
@@ -356,7 +379,7 @@ function PrimaryButton({ children, onClick, disabled, style }) {
         padding: "13px 16px",
         fontSize: 15,
         fontWeight: 600,
-        fontFamily: "'Space Grotesk',sans-serif",
+        fontFamily: "'Inter',sans-serif",
         opacity: disabled ? 0.6 : 1,
         cursor: disabled ? "not-allowed" : "pointer",
         ...style,
@@ -380,7 +403,7 @@ function Badge({ status }) {
         background: s.bg,
         color: s.color,
         fontSize: 11,
-        fontFamily: "'IBM Plex Mono',monospace",
+        fontFamily: "'Roboto Mono',monospace",
         padding: "3px 8px",
         borderRadius: 999,
         letterSpacing: 0.3,
@@ -407,7 +430,9 @@ export default function App() {
   const [newIdentitySheet, setNewIdentitySheet] = useState(false);
   const [newProjectSheet, setNewProjectSheet] = useState(false);
   const [newTaskSheet, setNewTaskSheet] = useState(false);
+  const [editTaskSheet, setEditTaskSheet] = useState(false);
   const [submitSheet, setSubmitSheet] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState(null);
 
   const [nameInput, setNameInput] = useState("");
   const [titleInput, setTitleInput] = useState("");
@@ -416,6 +441,7 @@ export default function App() {
   const [solutionInput, setSolutionInput] = useState("");
 
   const [verifyResult, setVerifyResult] = useState(null);
+  const [activityLog, setActivityLog] = useState([]);
 
   // ---------- initial load + realtime ----------
   const refreshAll = useCallback(async () => {
@@ -443,12 +469,27 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "submissions" }, refreshAll)
       .on("postgres_changes", { event: "*", schema: "public", table: "votes" }, refreshAll)
       .on("postgres_changes", { event: "*", schema: "public", table: "chain_blocks" }, refreshAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "activity_log" }, () => {
+        setScreen((s) => {
+          if (s.name !== "list") loadActivityLog(s.projectId).then(setActivityLog);
+          return s;
+        });
+      })
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
   }, [refreshAll]);
+
+  // load the activity log whenever a project is opened
+  useEffect(() => {
+    if (screen.name !== "list" && screen.projectId) {
+      loadActivityLog(screen.projectId).then(setActivityLog);
+    } else {
+      setActivityLog([]);
+    }
+  }, [screen.name, screen.projectId]);
 
 
   // ---------- balances ----------
@@ -490,6 +531,7 @@ export default function App() {
       return;
     }
     await supabase.from("project_participants").insert({ project_id: inserted.id, address: activeAddress });
+    logActivity(inserted.id, activeAddress, "project_created", { title: inserted.title });
     await refreshAll();
     setTitleInput("");
     setDescInput("");
@@ -503,10 +545,10 @@ export default function App() {
         .from("project_participants")
         .insert({ project_id: projectId, address: activeAddress });
       if (error && error.code !== "23505") {
-        // 23505 = already a participant (unique constraint) — safe to ignore
         console.error("joinProject failed", error);
         return;
       }
+      if (!error) logActivity(projectId, activeAddress, "joined_project", {});
       await refreshAll();
     },
     [activeAddress, refreshAll]
@@ -521,11 +563,13 @@ export default function App() {
       title: titleInput.trim(),
       description: descInput.trim(),
       reward,
+      created_by: activeAddress,
     });
     if (error) {
       console.error("createTask failed", error);
       return;
     }
+    logActivity(screen.projectId, activeAddress, "task_created", { title: titleInput.trim() });
     await refreshAll();
     setTitleInput("");
     setDescInput("");
@@ -533,11 +577,58 @@ export default function App() {
     setNewTaskSheet(false);
   }, [activeAddress, titleInput, descInput, rewardInput, screen, refreshAll]);
 
+  const openEditTask = useCallback((task) => {
+    setEditingTaskId(task.id);
+    setTitleInput(task.title);
+    setDescInput(task.description);
+    setRewardInput(String(task.reward));
+    setEditTaskSheet(true);
+  }, []);
+
+  const updateTask = useCallback(async () => {
+    if (!editingTaskId || !titleInput.trim() || screen.name !== "project") return;
+    const reward = Math.max(1, Number(rewardInput) || 0);
+    const { error } = await supabase
+      .from("tasks")
+      .update({ title: titleInput.trim(), description: descInput.trim(), reward })
+      .eq("id", editingTaskId)
+      .eq("status", "open");
+    if (error) {
+      console.error("updateTask failed", error);
+      alert("Не удалось изменить задачу: " + error.message);
+      return;
+    }
+    logActivity(screen.projectId, activeAddress, "task_edited", { title: titleInput.trim() });
+    await refreshAll();
+    setTitleInput("");
+    setDescInput("");
+    setRewardInput("10");
+    setEditingTaskId(null);
+    setEditTaskSheet(false);
+  }, [editingTaskId, titleInput, descInput, rewardInput, screen, activeAddress, refreshAll]);
+
+  const deleteTask = useCallback(
+    async (task) => {
+      if (!window.confirm(`Удалить задачу «${task.title}»? Это необратимо.`)) return;
+      const { error } = await supabase.from("tasks").delete().eq("id", task.id).eq("status", "open");
+      if (error) {
+        console.error("deleteTask failed", error);
+        alert("Не удалось удалить задачу: " + error.message);
+        return;
+      }
+      logActivity(task.projectId, activeAddress, "task_deleted", { title: task.title });
+      await refreshAll();
+      setScreen({ name: "project", projectId: task.projectId });
+    },
+    [activeAddress, refreshAll]
+  );
+
   const submitSolution = useCallback(
     async (taskId) => {
       if (!activeAddress || !solutionInput.trim()) return;
       const identity = identities.find((i) => i.address === activeAddress);
       if (!identity) return;
+      const task = tasks.find((t) => t.id === taskId);
       const payload = {
         taskId,
         address: activeAddress,
@@ -547,6 +638,7 @@ export default function App() {
       const signature = await signPayload(identity.privateJwk, payload);
       try {
         await submitSolutionSecure({ ...payload, signature });
+        if (task) logActivity(task.projectId, activeAddress, "solution_submitted", { title: task.title });
         await refreshAll();
       } catch (e) {
         console.error("submitSolution failed", e);
@@ -556,7 +648,7 @@ export default function App() {
       setSolutionInput("");
       setSubmitSheet(false);
     },
-    [activeAddress, solutionInput, identities, refreshAll]
+    [activeAddress, solutionInput, identities, tasks, refreshAll]
   );
 
   const castVote = useCallback(
@@ -572,6 +664,7 @@ export default function App() {
       const signature = await signPayload(identity.privateJwk, votePayload);
       try {
         await castVoteSecure({ ...votePayload, signature });
+        logActivity(task.projectId, activeAddress, "voted", { title: task.title, approve });
         await refreshAll();
       } catch (e) {
         console.error("castVote failed", e);
@@ -624,7 +717,7 @@ export default function App() {
     return (
       <div style={{ ...appShellStyle, alignItems: "center", justifyContent: "center" }}>
         <style>{FONTS}</style>
-        <span style={{ color: COLORS.textDim, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13 }}>
+        <span style={{ color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", fontSize: 13 }}>
           загрузка реестра…
         </span>
       </div>
@@ -639,7 +732,7 @@ export default function App() {
         body { margin: 0; }
         ::placeholder { color: ${COLORS.textDim}; opacity: 0.7; }
         @keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        @keyframes stampIn { from { transform: scale(1.6) rotate(-8deg); opacity: 0; } to { transform: scale(1) rotate(-8deg); opacity: 1; } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
       `}</style>
 
       {/* top bar */}
@@ -654,14 +747,11 @@ export default function App() {
         }}
       >
         <div>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: COLORS.text, letterSpacing: -0.3 }}>
+          <div style={{ fontFamily: "'Inter',sans-serif", fontWeight: 700, fontSize: 18, color: COLORS.text, letterSpacing: -0.3 }}>
             Реестр вклада
           </div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: COLORS.textDim }}>
+          <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: COLORS.textDim }}>
             монеты — за выполненные задачи
-          </div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 9, color: COLORS.rust, marginTop: 2, wordBreak: "break-all" }}>
-            DEBUG backend: {BACKEND_URL ? BACKEND_URL : "(не задан!)"}
           </div>
         </div>
         <button
@@ -679,17 +769,17 @@ export default function App() {
           {activeIdentity ? (
             <>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 12, color: COLORS.text, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600 }}>
+                <div style={{ fontSize: 12, color: COLORS.text, fontFamily: "'Inter',sans-serif", fontWeight: 600 }}>
                   {activeIdentity.name}
                 </div>
-                <div style={{ fontSize: 11, color: COLORS.gold, fontFamily: "'IBM Plex Mono',monospace" }}>
+                <div style={{ fontSize: 11, color: COLORS.gold, fontFamily: "'Roboto Mono',monospace" }}>
                   {activeBalance} монет
                 </div>
               </div>
               <Wallet size={18} color={COLORS.gold} />
             </>
           ) : (
-            <span style={{ fontSize: 12, color: COLORS.gold, fontFamily: "'Space Grotesk',sans-serif" }}>Создать личность</span>
+            <span style={{ fontSize: 12, color: COLORS.gold, fontFamily: "'Inter',sans-serif" }}>Создать личность</span>
           )}
         </button>
       </div>
@@ -722,6 +812,7 @@ export default function App() {
             tasksList={projectTasks}
             activeAddress={activeAddress}
             identities={identities}
+            activityLog={activityLog}
             onBack={() => setScreen({ name: "list" })}
             onJoin={() => joinProject(currentProject.id)}
             onNewTask={() => setNewTaskSheet(true)}
@@ -738,6 +829,8 @@ export default function App() {
             onBack={() => setScreen({ name: "project", projectId: currentProject.id })}
             onSubmit={() => setSubmitSheet(true)}
             onVote={(approve) => castVote(currentTask.id, approve)}
+            onEdit={() => openEditTask(currentTask)}
+            onDelete={() => deleteTask(currentTask)}
           />
         )}
 
@@ -785,7 +878,7 @@ export default function App() {
             <span
               style={{
                 fontSize: 11,
-                fontFamily: "'IBM Plex Mono',monospace",
+                fontFamily: "'Roboto Mono',monospace",
                 color: tab === key ? COLORS.gold : COLORS.textDim,
               }}
             >
@@ -822,10 +915,10 @@ export default function App() {
             }}
           >
             <div style={{ textAlign: "left" }}>
-              <div style={{ color: COLORS.text, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14 }}>
+              <div style={{ color: COLORS.text, fontFamily: "'Inter',sans-serif", fontWeight: 600, fontSize: 14 }}>
                 {id.name}
               </div>
-              <div style={{ color: COLORS.textDim, fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>
+              <div style={{ color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", fontSize: 11 }}>
                 {shortAddr(id.address)} · {balances[id.address] || 0} монет
               </div>
             </div>
@@ -907,6 +1000,40 @@ export default function App() {
         </PrimaryButton>
       </Sheet>
 
+      {/* edit task sheet */}
+      <Sheet
+        open={editTaskSheet}
+        onClose={() => {
+          setEditTaskSheet(false);
+          setEditingTaskId(null);
+        }}
+        title="Изменить задачу"
+      >
+        <Field label="название">
+          <input style={inputStyle} value={titleInput} onChange={(e) => setTitleInput(e.target.value)} placeholder="Что нужно сделать" />
+        </Field>
+        <Field label="описание">
+          <textarea
+            style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
+            value={descInput}
+            onChange={(e) => setDescInput(e.target.value)}
+            placeholder="Подробности задачи"
+          />
+        </Field>
+        <Field label="награда, монет">
+          <input
+            style={inputStyle}
+            type="number"
+            min="1"
+            value={rewardInput}
+            onChange={(e) => setRewardInput(e.target.value)}
+          />
+        </Field>
+        <PrimaryButton onClick={updateTask} disabled={!titleInput.trim()}>
+          Сохранить изменения
+        </PrimaryButton>
+      </Sheet>
+
       {/* submit solution sheet */}
       <Sheet open={submitSheet} onClose={() => setSubmitSheet(false)} title="Отправить решение">
         <Field label="что сделано / ссылка / описание результата">
@@ -933,7 +1060,7 @@ const appShellStyle = {
   width: "100%",
   background: COLORS.bg,
   color: COLORS.text,
-  fontFamily: "'Space Grotesk',sans-serif",
+  fontFamily: "'Inter',sans-serif",
 };
 
 // ---------- Wallet tab ----------
@@ -961,12 +1088,12 @@ function WalletTab({ identities, balances, activeAddress, setActiveAddress, onNe
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
               <div style={{ fontWeight: 600, fontSize: 15 }}>{id.name}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>
+              <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>
                 {shortAddr(id.address)}
               </div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ color: COLORS.gold, fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, fontSize: 16 }}>
+              <div style={{ color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 16 }}>
                 {balances[id.address] || 0}
               </div>
               <div style={{ fontSize: 10, color: COLORS.textDim }}>монет</div>
@@ -1032,16 +1159,38 @@ function ProjectsList({ projects, tasks, onOpen, onNew, hasIdentity }) {
 
 function MiniStat({ icon: Icon, value }) {
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 4, color: COLORS.textDim, fontSize: 12, fontFamily: "'IBM Plex Mono',monospace" }}>
+    <span style={{ display: "flex", alignItems: "center", gap: 4, color: COLORS.textDim, fontSize: 12, fontFamily: "'Roboto Mono',monospace" }}>
       <Icon size={13} /> {value}
     </span>
   );
 }
 
 // ---------- Project detail ----------
-function ProjectDetail({ project, tasksList, activeAddress, identities, onBack, onJoin, onNewTask, onOpenTask }) {
+function ProjectDetail({ project, tasksList, activeAddress, identities, activityLog, onBack, onJoin, onNewTask, onOpenTask }) {
   const isParticipant = activeAddress && project.participants.includes(activeAddress);
   const nameFor = (addr) => identities.find((i) => i.address === addr)?.name || shortAddr(addr);
+
+  const actionLabel = (entry) => {
+    const d = entry.details || {};
+    switch (entry.action) {
+      case "project_created":
+        return "создал(а) проект";
+      case "joined_project":
+        return "присоединился(ась) к проекту";
+      case "task_created":
+        return `добавил(а) задачу «${d.title}»`;
+      case "task_edited":
+        return `изменил(а) задачу «${d.title}»`;
+      case "task_deleted":
+        return `удалил(а) задачу «${d.title}»`;
+      case "solution_submitted":
+        return `отправил(а) решение по «${d.title}»`;
+      case "voted":
+        return `проголосовал(а) ${d.approve ? "«за»" : "«против»"} по «${d.title}»`;
+      default:
+        return entry.action;
+    }
+  };
 
   return (
     <div>
@@ -1059,7 +1208,7 @@ function ProjectDetail({ project, tasksList, activeAddress, identities, onBack, 
               borderRadius: 999,
               padding: "4px 10px",
               fontSize: 11.5,
-              fontFamily: "'IBM Plex Mono',monospace",
+              fontFamily: "'Roboto Mono',monospace",
               color: COLORS.textDim,
             }}
           >
@@ -1084,7 +1233,7 @@ function ProjectDetail({ project, tasksList, activeAddress, identities, onBack, 
                 <div style={{ fontWeight: 600, fontSize: 14.5 }}>{t.title}</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
                   <Badge status={t.status} />
-                  <span style={{ display: "flex", alignItems: "center", gap: 3, color: COLORS.gold, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 3, color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontSize: 12 }}>
                     <Coins size={12} /> {t.reward}
                   </span>
                 </div>
@@ -1101,13 +1250,35 @@ function ProjectDetail({ project, tasksList, activeAddress, identities, onBack, 
           </PrimaryButton>
         )}
       </div>
+
+      {activityLog.length > 0 && (
+        <div style={{ marginTop: 26 }}>
+          <SectionTitle>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <History size={12} /> Журнал действий
+            </span>
+          </SectionTitle>
+          {activityLog.map((entry) => (
+            <div key={entry.id} style={{ display: "flex", gap: 8, marginBottom: 10, fontSize: 12.5 }}>
+              <div style={{ color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", flexShrink: 0, minWidth: 44 }}>
+                {fmtTime(entry.createdAt).split(",")[1]?.trim() || fmtTime(entry.createdAt)}
+              </div>
+              <div style={{ color: COLORS.text }}>
+                <span style={{ fontWeight: 600 }}>{nameFor(entry.address)}</span>{" "}
+                <span style={{ color: COLORS.textDim }}>{actionLabel(entry)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // ---------- Task detail ----------
-function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit, onVote }) {
+function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit, onVote, onEdit, onDelete }) {
   const isParticipant = activeAddress && project.participants.includes(activeAddress);
+  const isOwner = activeAddress && task.createdBy === activeAddress;
   const nameFor = (addr) => identities.find((i) => i.address === addr)?.name || shortAddr(addr);
   const alreadyVoted = task.votes.find((v) => v.address === activeAddress);
   const isSubmitter = task.submission && task.submission.address === activeAddress;
@@ -1115,7 +1286,6 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
   const votesFor = task.votes.filter((v) => v.approve).length;
   const votesAgainst = task.votes.filter((v) => !v.approve).length;
 
-  // live signature verification for the current submission + votes
   const [sigValid, setSigValid] = useState({});
   useEffect(() => {
     let cancelled = false;
@@ -1147,26 +1317,42 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
         <Badge status={task.status} />
       </div>
       {task.description && <div style={{ color: COLORS.textDim, fontSize: 13.5, marginTop: 6, lineHeight: 1.5 }}>{task.description}</div>}
-      <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 10, color: COLORS.gold, fontFamily: "'IBM Plex Mono',monospace", fontSize: 13 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 10, color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontSize: 13 }}>
         <Coins size={14} /> награда: {task.reward} монет
       </div>
+
+      {isOwner && task.status === "open" && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button onClick={onEdit} style={iconTextBtnStyle}>
+            <Pencil size={14} /> Изменить
+          </button>
+          <button onClick={onDelete} style={{ ...iconTextBtnStyle, color: COLORS.rust }}>
+            <Trash2 size={14} /> Удалить
+          </button>
+        </div>
+      )}
 
       {task.status === "approved" && (
         <div
           style={{
             marginTop: 18,
-            border: `2px solid ${COLORS.sage}`,
+            background: "rgba(79,174,78,0.12)",
             borderRadius: 12,
             padding: "14px 16px",
-            transform: "rotate(-1deg)",
-            animation: "stampIn 0.3s ease-out",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            animation: "fadeInUp 0.25s ease-out",
           }}
         >
-          <div style={{ color: COLORS.sage, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", fontSize: 14, letterSpacing: 1 }}>
-            ПРИНЯТО ГОЛОСОВАНИЕМ
-          </div>
-          <div style={{ color: COLORS.textDim, fontSize: 12, marginTop: 4 }}>
-            {nameFor(task.submission.address)} получил(а) {task.reward} монет
+          <CheckCircle2 size={18} color={COLORS.sage} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div>
+            <div style={{ color: COLORS.sage, fontWeight: 600, fontFamily: "'Inter',sans-serif", fontSize: 14 }}>
+              Принято голосованием
+            </div>
+            <div style={{ color: COLORS.textDim, fontSize: 12, marginTop: 2 }}>
+              {nameFor(task.submission.address)} получил(а) {task.reward} монет
+            </div>
           </div>
         </div>
       )}
@@ -1188,7 +1374,7 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
             style={{
               fontSize: 12,
               color: COLORS.textDim,
-              fontFamily: "'IBM Plex Mono',monospace",
+              fontFamily: "'Roboto Mono',monospace",
               marginBottom: 6,
               display: "flex",
               alignItems: "center",
@@ -1201,7 +1387,7 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
           <div style={{ ...cardStyle, background: COLORS.surfaceRaised }}>{task.submission.text}</div>
 
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, marginBottom: 10 }}>
-            <span style={{ fontSize: 12, color: COLORS.textDim, fontFamily: "'IBM Plex Mono',monospace" }}>
+            <span style={{ fontSize: 12, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace" }}>
               голоса: {votesFor} за / {votesAgainst} против · нужно больше половины из {eligible}
             </span>
           </div>
@@ -1213,7 +1399,7 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
                   key={v.address}
                   style={{
                     fontSize: 11,
-                    fontFamily: "'IBM Plex Mono',monospace",
+                    fontFamily: "'Roboto Mono',monospace",
                     padding: "3px 8px",
                     borderRadius: 999,
                     background: v.approve ? "rgba(111,162,135,0.15)" : "rgba(193,84,76,0.15)",
@@ -1269,6 +1455,20 @@ function SigBadge({ valid, inline }) {
   );
 }
 
+const iconTextBtnStyle = {
+  background: "transparent",
+  border: `1px solid ${COLORS.border}`,
+  borderRadius: 8,
+  padding: "7px 12px",
+  color: COLORS.textDim,
+  fontSize: 12.5,
+  fontFamily: "'Inter',sans-serif",
+  fontWeight: 500,
+  display: "flex",
+  alignItems: "center",
+  gap: 5,
+};
+
 const voteBtnStyle = {
   flex: 1,
   background: "transparent",
@@ -1277,7 +1477,7 @@ const voteBtnStyle = {
   padding: "11px 0",
   fontSize: 14,
   fontWeight: 600,
-  fontFamily: "'Space Grotesk',sans-serif",
+  fontFamily: "'Inter',sans-serif",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -1306,7 +1506,7 @@ function ChainTab({ chain, tasks, identities, onVerify, verifyResult }) {
           borderRadius: 10,
           padding: "11px 0",
           color: COLORS.text,
-          fontFamily: "'Space Grotesk',sans-serif",
+          fontFamily: "'Inter',sans-serif",
           fontWeight: 600,
           fontSize: 14,
           display: "flex",
@@ -1343,7 +1543,7 @@ function ChainTab({ chain, tasks, identities, onVerify, verifyResult }) {
             {i !== chain.length - 1 && <div style={{ flex: 1, width: 1.5, background: COLORS.border, marginTop: 2 }} />}
           </div>
           <div style={{ ...cardStyle, flex: 1, marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: COLORS.textDim }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: COLORS.textDim }}>
               <span>блок #{b.index}</span>
               <span>{fmtTime(b.timestamp)}</span>
             </div>
@@ -1352,12 +1552,12 @@ function ChainTab({ chain, tasks, identities, onVerify, verifyResult }) {
             ) : (
               b.events.map((e, idx) => (
                 <div key={idx} style={{ fontSize: 13, color: COLORS.text, marginTop: 6 }}>
-                  «{titleFor(e.taskId)}» одобрена → <span style={{ color: COLORS.gold, fontFamily: "'IBM Plex Mono',monospace" }}>+{e.amount}</span> монет для{" "}
+                  «{titleFor(e.taskId)}» одобрена → <span style={{ color: COLORS.gold, fontFamily: "'Roboto Mono',monospace" }}>+{e.amount}</span> монет для{" "}
                   {nameFor(e.to)}
                 </div>
               ))
             )}
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 10.5, color: COLORS.textDim, marginTop: 8, wordBreak: "break-all" }}>
+            <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 10.5, color: COLORS.textDim, marginTop: 8, wordBreak: "break-all" }}>
               hash: {b.hash.slice(0, 24)}…
             </div>
           </div>
@@ -1373,7 +1573,7 @@ function SectionTitle({ children }) {
     <div
       style={{
         fontSize: 11,
-        fontFamily: "'IBM Plex Mono',monospace",
+        fontFamily: "'Roboto Mono',monospace",
         color: COLORS.textDim,
         letterSpacing: 1,
         textTransform: "uppercase",
@@ -1414,7 +1614,7 @@ function BackRow({ onBack, label }) {
         gap: 4,
         color: COLORS.textDim,
         fontSize: 13,
-        fontFamily: "'IBM Plex Mono',monospace",
+        fontFamily: "'Roboto Mono',monospace",
         padding: 0,
       }}
     >
