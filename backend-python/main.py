@@ -144,7 +144,7 @@ def submit_solution(body: SubmitSolutionBody):
 
     supabase.table("submissions").update({"is_active": False}).eq("task_id", body.taskId).eq(
         "is_active", True
-    ).execute()
+    ).select().execute()
 
     supabase.table("submissions").insert(
         {
@@ -155,9 +155,9 @@ def submit_solution(body: SubmitSolutionBody):
             "signature": body.signature,
             "is_active": True,
         }
-    ).execute()
+    ).select().execute()
 
-    supabase.table("tasks").update({"status": "submitted"}).eq("id", body.taskId).execute()
+    supabase.table("tasks").update({"status": "submitted"}).eq("id", body.taskId).select().execute()
 
     return {"ok": True}
 
@@ -225,7 +225,7 @@ def cast_vote(body: CastVoteBody):
             "voted_at": body.votedAt,
             "signature": body.signature,
         }
-    ).execute()
+    ).select().execute()
 
     # источник истины для подсчёта — база данных, а не то, что прислал клиент
     participants_res = (
@@ -290,14 +290,14 @@ def cast_vote(body: CastVoteBody):
                 "hash": block_hash,
                 "events": events,
             }
-        ).execute()
+        ).select().execute()
 
-        supabase.table("tasks").update({"status": "approved"}).eq("id", body.taskId).execute()
+        supabase.table("tasks").update({"status": "approved"}).eq("id", body.taskId).select().execute()
 
     elif eligible > 0 and votes_against > eligible / 2:
         outcome = "rejected"
-        supabase.table("submissions").update({"is_active": False}).eq("id", submission["id"]).execute()
-        supabase.table("tasks").update({"status": "open"}).eq("id", body.taskId).execute()
+        supabase.table("submissions").update({"is_active": False}).eq("id", submission["id"]).select().execute()
+        supabase.table("tasks").update({"status": "open"}).eq("id", body.taskId).select().execute()
 
     return {"ok": True, "outcome": outcome, "votesFor": votes_for, "votesAgainst": votes_against, "eligible": eligible}
 
