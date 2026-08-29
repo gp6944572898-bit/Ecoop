@@ -54,11 +54,14 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def safe_data(res):
-    """maybe_single().execute() returns None (not a response object) when no
-    row matches, depending on the supabase-py version — accessing .data on
-    that None crashes. This normalizes both cases to "no data"."""
-    return res.data if res is not None else None
+def first_or_none(query):
+    """Avoids .single()/.maybe_single() entirely: this postgrest-py version
+    behaves inconsistently with them (sometimes returns None, sometimes
+    raises APIError("Missing response") even when a row exists). A plain
+    list select + manual indexing sidesteps that whole class of bugs."""
+    res = query.execute()
+    rows = res.data or []
+    return rows[0] if rows else None
 
 
 def js_number(x: Any) -> Any:
@@ -124,22 +127,19 @@ def submit_solution(body: SubmitSolutionBody):
     if not verify_payload(body.address, payload, body.signature):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    task_res = supabase.table("tasks").select("*").eq("id", body.taskId).single().execute()
-    task = task_res.data
+    task = first_or_none(supabase.table("tasks").select("*").eq("id", body.taskId))
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     if task["status"] != "open":
         raise HTTPException(status_code=409, detail="Task is not open for submissions")
 
-    participant_res = (
+    participant = first_or_none(
         supabase.table("project_participants")
         .select("address")
         .eq("project_id", task["project_id"])
         .eq("address", body.address)
-        .maybe_single()
-        .execute()
     )
-    if not safe_data(participant_res):
+    if not participant:
         raise HTTPException(status_code=403, detail="Address is not a project participant")
 
     supabase.table("submissions").update({"is_active": False}).eq("task_id", body.taskId).eq(
@@ -175,45 +175,31 @@ def cast_vote(body: CastVoteBody):
     if not verify_payload(body.address, payload, body.signature):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    task_res = supabase.table("tasks").select("*").eq("id", body.taskId).single().execute()
-    task = task_res.data
+    task = first_or_none(supabase.table("tasks").select("*").eq("id", body.taskId))
     if not task or task["status"] != "submitted":
         raise HTTPException(status_code=409, detail="Task is not open for voting")
 
-    submission_res = (
-        supabase.table("submissions")
-        .select("*")
-        .eq("task_id", body.taskId)
-        .eq("is_active", True)
-        .maybe_single()
-        .execute()
+    submission = first_or_none(
+        supabase.table("submissions").select("*").eq("task_id", body.taskId).eq("is_active", True)
     )
-    submission = safe_data(submission_res)
     if not submission:
         raise HTTPException(status_code=409, detail="No active submission")
     if submission["address"] == body.address:
         raise HTTPException(status_code=403, detail="Cannot vote on your own submission")
 
-    participant_res = (
+    participant = first_or_none(
         supabase.table("project_participants")
         .select("address")
         .eq("project_id", task["project_id"])
         .eq("address", body.address)
-        .maybe_single()
-        .execute()
     )
-    if not safe_data(participant_res):
+    if not participant:
         raise HTTPException(status_code=403, detail="Not a project participant")
 
-    existing_vote_res = (
-        supabase.table("votes")
-        .select("id")
-        .eq("submission_id", submission["id"])
-        .eq("address", body.address)
-        .maybe_single()
-        .execute()
+    existing_vote = first_or_none(
+        supabase.table("votes").select("id").eq("submission_id", submission["id"]).eq("address", body.address)
     )
-    if safe_data(existing_vote_res):
+    if existing_vote:
         raise HTTPException(status_code=409, detail="Already voted")
 
     supabase.table("votes").insert(
@@ -244,10 +230,9 @@ def cast_vote(body: CastVoteBody):
     if eligible > 0 and votes_for > eligible / 2:
         outcome = "approved"
 
-        last_block_res = (
-            supabase.table("chain_blocks").select("*").order("index", desc=True).limit(1).maybe_single().execute()
+        last_block = first_or_none(
+            supabase.table("chain_blocks").select("*").order("index", desc=True).limit(1)
         )
-        last_block = safe_data(last_block_res)
         new_index = (last_block["index"] + 1) if last_block else 0
         previous_hash = last_block["hash"] if last_block else "0" * 64
         timestamp = int(time.time() * 1000)
