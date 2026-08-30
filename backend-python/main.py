@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -62,6 +63,20 @@ def first_or_none(query):
     res = query.execute()
     rows = res.data or []
     return rows[0] if rows else None
+
+
+def execute_ignore_204(query):
+    """Runs an insert/update whose result we don't need back. This
+    postgrest-py version sometimes raises APIError("Missing response",
+    code 204) even though the write itself succeeded (204 = success, no
+    body) — .select() isn't available on this builder to force a body
+    back, so we just treat that specific error as a normal success."""
+    try:
+        return query.execute()
+    except APIError as e:
+        if str(getattr(e, "code", "")) == "204" or "Missing response" in str(e):
+            return None
+        raise
 
 
 def js_number(x: Any) -> Any:
@@ -142,22 +157,24 @@ def submit_solution(body: SubmitSolutionBody):
     if not participant:
         raise HTTPException(status_code=403, detail="Address is not a project participant")
 
-    supabase.table("submissions").update({"is_active": False}).eq("task_id", body.taskId).eq(
-        "is_active", True
-    ).select().execute()
+    execute_ignore_204(
+        supabase.table("submissions").update({"is_active": False}).eq("task_id", body.taskId).eq("is_active", True)
+    )
 
-    supabase.table("submissions").insert(
-        {
-            "task_id": body.taskId,
-            "address": body.address,
-            "text_body": body.text,
-            "submitted_at": body.submittedAt,
-            "signature": body.signature,
-            "is_active": True,
-        }
-    ).select().execute()
+    execute_ignore_204(
+        supabase.table("submissions").insert(
+            {
+                "task_id": body.taskId,
+                "address": body.address,
+                "text_body": body.text,
+                "submitted_at": body.submittedAt,
+                "signature": body.signature,
+                "is_active": True,
+            }
+        )
+    )
 
-    supabase.table("tasks").update({"status": "submitted"}).eq("id", body.taskId).select().execute()
+    execute_ignore_204(supabase.table("tasks").update({"status": "submitted"}).eq("id", body.taskId))
 
     return {"ok": True}
 
@@ -202,16 +219,18 @@ def cast_vote(body: CastVoteBody):
     if existing_vote:
         raise HTTPException(status_code=409, detail="Already voted")
 
-    supabase.table("votes").insert(
-        {
-            "task_id": body.taskId,
-            "submission_id": submission["id"],
-            "address": body.address,
-            "approve": body.approve,
-            "voted_at": body.votedAt,
-            "signature": body.signature,
-        }
-    ).select().execute()
+    execute_ignore_204(
+        supabase.table("votes").insert(
+            {
+                "task_id": body.taskId,
+                "submission_id": submission["id"],
+                "address": body.address,
+                "approve": body.approve,
+                "voted_at": body.votedAt,
+                "signature": body.signature,
+            }
+        )
+    )
 
     # источник истины для подсчёта — база данных, а не то, что прислал клиент
     participants_res = (
@@ -267,22 +286,24 @@ def cast_vote(body: CastVoteBody):
         block_payload = {"index": new_index, "timestamp": timestamp, "previousHash": previous_hash, "events": events}
         block_hash = sha256_hex(canonical_json(block_payload))
 
-        supabase.table("chain_blocks").insert(
-            {
-                "index": new_index,
-                "timestamp": timestamp,
-                "previous_hash": previous_hash,
-                "hash": block_hash,
-                "events": events,
-            }
-        ).select().execute()
+        execute_ignore_204(
+            supabase.table("chain_blocks").insert(
+                {
+                    "index": new_index,
+                    "timestamp": timestamp,
+                    "previous_hash": previous_hash,
+                    "hash": block_hash,
+                    "events": events,
+                }
+            )
+        )
 
-        supabase.table("tasks").update({"status": "approved"}).eq("id", body.taskId).select().execute()
+        execute_ignore_204(supabase.table("tasks").update({"status": "approved"}).eq("id", body.taskId))
 
     elif eligible > 0 and votes_against > eligible / 2:
         outcome = "rejected"
-        supabase.table("submissions").update({"is_active": False}).eq("id", submission["id"]).select().execute()
-        supabase.table("tasks").update({"status": "open"}).eq("id", body.taskId).select().execute()
+        execute_ignore_204(supabase.table("submissions").update({"is_active": False}).eq("id", submission["id"]))
+        execute_ignore_204(supabase.table("tasks").update({"status": "open"}).eq("id", body.taskId))
 
     return {"ok": True, "outcome": outcome, "votesFor": votes_for, "votesAgainst": votes_against, "eligible": eligible}
 
