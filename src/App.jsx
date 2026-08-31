@@ -196,6 +196,9 @@ function hexToBuf(hex) {
 
 const EC_PARAMS = { name: "ECDSA", namedCurve: "P-256" };
 
+// Generates a real ECDSA (P-256) keypair. The address IS the hex-encoded
+// public key, so anyone can verify a signature just from the address —
+// no separate "lookup" needed, same principle as Bitcoin/Ethereum addresses.
 async function generateKeyPair() {
   const keyPair = await crypto.subtle.generateKey(EC_PARAMS, true, ["sign", "verify"]);
   const pubRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
@@ -211,6 +214,7 @@ async function importPublicKeyFromAddress(address) {
   return crypto.subtle.importKey("raw", hexToBuf(address), EC_PARAMS, true, ["verify"]);
 }
 
+// Signs a plain object payload with an identity's private key (JWK form).
 async function signPayload(privateJwk, payloadObj) {
   const key = await importPrivateKey(privateJwk);
   const data = new TextEncoder().encode(JSON.stringify(payloadObj));
@@ -218,6 +222,7 @@ async function signPayload(privateJwk, payloadObj) {
   return bufToHex(sig);
 }
 
+// Verifies a signature against the payload and the signer's address (public key).
 async function verifyPayload(address, payloadObj, signatureHex) {
   try {
     const key = await importPublicKeyFromAddress(address);
@@ -228,11 +233,17 @@ async function verifyPayload(address, payloadObj, signatureHex) {
   }
 }
 
+// Strips the "signature" field off a signed record, leaving the exact
+// payload shape that was originally signed (for re-verification).
 function payloadOf(signed) {
   const { signature, ...payload } = signed;
   return payload;
 }
 
+// ---------- security-critical writes go through the Python backend, not
+// direct table inserts: it re-verifies the ECDSA signature server-side and,
+// for votes, recomputes the tally from the database itself before minting
+// any reward — the browser can no longer fabricate an approval. ----------
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
 async function callBackend(path, body) {
@@ -545,6 +556,7 @@ export default function App() {
         .from("project_participants")
         .insert({ project_id: projectId, address: activeAddress });
       if (error && error.code !== "23505") {
+        // 23505 = already a participant (unique constraint) — safe to ignore
         console.error("joinProject failed", error);
         return;
       }
@@ -834,6 +846,10 @@ export default function App() {
           />
         )}
 
+        {tab === "activity" && (
+          <ActivityTab chain={chain} tasks={tasks} identities={identities} activeAddress={activeAddress} />
+        )}
+
         {tab === "chain" && (
           <ChainTab chain={chain} tasks={tasks} identities={identities} onVerify={verifyChain} verifyResult={verifyResult} />
         )}
@@ -855,6 +871,7 @@ export default function App() {
         {[
           { key: "wallet", label: "Кошелёк", icon: Wallet },
           { key: "projects", label: "Проекты", icon: ListChecks },
+          { key: "activity", label: "Активность", icon: History },
           { key: "chain", label: "Реестр", icon: Link2 },
         ].map(({ key, label, icon: Icon }) => (
           <button
@@ -1286,6 +1303,7 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
   const votesFor = task.votes.filter((v) => v.approve).length;
   const votesAgainst = task.votes.filter((v) => !v.approve).length;
 
+  // live signature verification for the current submission + votes
   const [sigValid, setSigValid] = useState({});
   useEffect(() => {
     let cancelled = false;
@@ -1484,7 +1502,86 @@ const voteBtnStyle = {
   gap: 6,
 };
 
-// ---------- Chain tab ----------
+// ---------- Activity tab: personal transaction history for the active identity ----------
+function ActivityTab({ chain, tasks, identities, activeAddress }) {
+  const nameFor = (addr) => identities.find((i) => i.address === addr)?.name || shortAddr(addr);
+  const titleFor = (taskId) => tasks.find((t) => t.id === taskId)?.title || "задача";
+
+  if (!activeAddress) {
+    return (
+      <div>
+        <SectionTitle>Активность</SectionTitle>
+        <EmptyState icon={History} text="Сначала создай или выбери личность на вкладке «Кошелёк»." />
+      </div>
+    );
+  }
+
+  const entries = [];
+  chain.forEach((b) => {
+    (b.events || []).forEach((e) => {
+      if (e.type === "reward" && e.to === activeAddress) {
+        entries.push({
+          key: b.hash + e.taskId,
+          amount: e.amount,
+          taskId: e.taskId,
+          timestamp: b.timestamp,
+        });
+      }
+    });
+  });
+  entries.sort((a, b) => b.timestamp - a.timestamp);
+
+  return (
+    <div>
+      <SectionTitle>Активность</SectionTitle>
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <div style={{ fontSize: 12.5, color: COLORS.textDim }}>
+          Все начисления монет, полученные личностью «{nameFor(activeAddress)}».
+        </div>
+      </div>
+      {entries.length === 0 && (
+        <EmptyState icon={History} text="Пока пусто — здесь появятся монеты за принятые задачи." />
+      )}
+      {entries.map((entry) => (
+        <div
+          key={entry.key}
+          style={{
+            ...cardStyle,
+            marginBottom: 10,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <div
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 999,
+              background: "rgba(42,171,238,0.12)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Coins size={16} color={COLORS.gold} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>«{titleFor(entry.taskId)}»</div>
+            <div style={{ fontSize: 11.5, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", marginTop: 2 }}>
+              {fmtTime(entry.timestamp)}
+            </div>
+          </div>
+          <div style={{ color: COLORS.sage, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 15 }}>
+            +{entry.amount}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ChainTab({ chain, tasks, identities, onVerify, verifyResult }) {
   const nameFor = (addr) => identities.find((i) => i.address === addr)?.name || shortAddr(addr);
   const titleFor = (taskId) => tasks.find((t) => t.id === taskId)?.title || "задача";
