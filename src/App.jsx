@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient.js";
 import {
   Wallet,
@@ -18,6 +18,10 @@ import {
   Pencil,
   Trash2,
   History,
+  CalendarClock,
+  Paperclip,
+  ThumbsUp,
+  ThumbsDown,
 } from "lucide-react";
 
 // ---------- palette / tokens (тёмная минималистичная тема) ----------
@@ -89,7 +93,7 @@ async function loadProjects() {
 async function loadTasks() {
   const [{ data: tasks, error: tErr }, { data: submissions, error: sErr }, { data: votes, error: vErr }] =
     await Promise.all([
-      supabase.from("tasks").select("id,project_id,title,description,reward,status,created_by,created_at"),
+      supabase.from("tasks").select("id,project_id,title,description,reward,status,created_by,created_at,deadline"),
       supabase.from("submissions").select("*").eq("is_active", true),
       supabase.from("votes").select("*"),
     ]);
@@ -113,8 +117,16 @@ async function loadTasks() {
       status: t.status,
       createdBy: t.created_by,
       createdAt: new Date(t.created_at).getTime(),
+      deadline: t.deadline ? new Date(t.deadline + "T00:00:00").getTime() : null,
       submission: sub
-        ? { taskId: t.id, address: sub.address, text: sub.text_body, submittedAt: sub.submitted_at, signature: sub.signature }
+        ? {
+            taskId: t.id,
+            address: sub.address,
+            text: sub.text_body,
+            attachmentUrl: sub.attachment_url || null,
+            submittedAt: sub.submitted_at,
+            signature: sub.signature,
+          }
         : null,
       votes: sub
         ? (votesBySubmission[sub.id] || []).map((v) => ({
@@ -240,6 +252,46 @@ function payloadOf(signed) {
   return payload;
 }
 
+// ---------- rich text sanitizer for pasted solution text ----------
+// Browsers preserve formatting (bold, paragraphs, lists) automatically when
+// pasting into a contentEditable box. We whitelist a small safe set of tags
+// before signing/storing/rendering it, stripping scripts, styles, images and
+// any attributes we don't trust (only <a href> survives).
+const ALLOWED_TAGS = new Set(["P", "DIV", "BR", "B", "STRONG", "I", "EM", "U", "UL", "OL", "LI", "A", "BLOCKQUOTE", "SPAN"]);
+
+function sanitizeHtml(html) {
+  const doc = new DOMParser().parseFromString(html || "", "text/html");
+  const clean = (node) => {
+    const kids = Array.from(node.childNodes);
+    for (const child of kids) {
+      if (child.nodeType === Node.TEXT_NODE) continue;
+      if (child.nodeType !== Node.ELEMENT_NODE || !ALLOWED_TAGS.has(child.tagName)) {
+        // unwrap disallowed elements (keep their text/children) instead of dropping content
+        while (child.firstChild) node.insertBefore(child.firstChild, child);
+        node.removeChild(child);
+        continue;
+      }
+      // strip all attributes except href on <a>
+      [...child.attributes].forEach((attr) => {
+        if (!(child.tagName === "A" && attr.name === "href")) child.removeAttribute(attr.name);
+      });
+      if (child.tagName === "A") {
+        child.setAttribute("target", "_blank");
+        child.setAttribute("rel", "noopener noreferrer");
+      }
+      clean(child);
+    }
+  };
+  clean(doc.body);
+  return doc.body.innerHTML.trim();
+}
+
+// Checks whether an HTML string has any actual visible text — "<p><br></p>"
+// or similar empty markup shouldn't count as filled-in content.
+function hasVisibleText(html) {
+  return new DOMParser().parseFromString(html || "", "text/html").body.textContent.trim().length > 0;
+}
+
 // ---------- security-critical writes go through the Python backend, not
 // direct table inserts: it re-verifies the ECDSA signature server-side and,
 // for votes, recomputes the tally from the database itself before minting
@@ -257,8 +309,8 @@ async function callBackend(path, body) {
   return data;
 }
 
-async function submitSolutionSecure({ taskId, address, text, submittedAt, signature }) {
-  return callBackend("/submit-solution", { taskId, address, text, submittedAt, signature });
+async function submitSolutionSecure({ taskId, address, text, attachmentUrl, submittedAt, signature }) {
+  return callBackend("/submit-solution", { taskId, address, text, attachmentUrl, submittedAt, signature });
 }
 
 async function castVoteSecure({ taskId, address, approve, votedAt, signature }) {
@@ -376,6 +428,32 @@ const inputStyle = {
   boxSizing: "border-box",
 };
 
+// A contentEditable box, not a <textarea>: pasting from anywhere (Word,
+// Google Docs, another site) keeps its paragraphs and bold/italic markup —
+// a plain textarea would flatten all of that to bare text. The Sheet that
+// hosts this unmounts when closed (see Sheet's `if (!open) return null`),
+// so the box always starts empty without any extra reset logic here.
+function RichTextInput({ onChange, placeholder }) {
+  const ref = useRef(null);
+  return (
+    <div
+      ref={ref}
+      contentEditable
+      suppressContentEditableWarning
+      onInput={() => onChange(ref.current.innerHTML)}
+      data-placeholder={placeholder}
+      style={{
+        ...inputStyle,
+        minHeight: 110,
+        maxHeight: 260,
+        overflowY: "auto",
+        cursor: "text",
+        lineHeight: 1.45,
+      }}
+    />
+  );
+}
+
 function PrimaryButton({ children, onClick, disabled, style }) {
   return (
     <button
@@ -449,7 +527,9 @@ export default function App() {
   const [titleInput, setTitleInput] = useState("");
   const [descInput, setDescInput] = useState("");
   const [rewardInput, setRewardInput] = useState("10");
+  const [deadlineInput, setDeadlineInput] = useState("");
   const [solutionInput, setSolutionInput] = useState("");
+  const [attachmentInput, setAttachmentInput] = useState("");
 
   const [verifyResult, setVerifyResult] = useState(null);
   const [activityLog, setActivityLog] = useState([]);
@@ -575,6 +655,7 @@ export default function App() {
       title: titleInput.trim(),
       description: descInput.trim(),
       reward,
+      deadline: deadlineInput || null,
       created_by: activeAddress,
     });
     if (error) {
@@ -586,14 +667,16 @@ export default function App() {
     setTitleInput("");
     setDescInput("");
     setRewardInput("10");
+    setDeadlineInput("");
     setNewTaskSheet(false);
-  }, [activeAddress, titleInput, descInput, rewardInput, screen, refreshAll]);
+  }, [activeAddress, titleInput, descInput, rewardInput, deadlineInput, screen, refreshAll]);
 
   const openEditTask = useCallback((task) => {
     setEditingTaskId(task.id);
     setTitleInput(task.title);
     setDescInput(task.description);
     setRewardInput(String(task.reward));
+    setDeadlineInput(task.deadline ? new Date(task.deadline).toISOString().slice(0, 10) : "");
     setEditTaskSheet(true);
   }, []);
 
@@ -602,7 +685,7 @@ export default function App() {
     const reward = Math.max(1, Number(rewardInput) || 0);
     const { error } = await supabase
       .from("tasks")
-      .update({ title: titleInput.trim(), description: descInput.trim(), reward })
+      .update({ title: titleInput.trim(), description: descInput.trim(), reward, deadline: deadlineInput || null })
       .eq("id", editingTaskId)
       .eq("status", "open");
     if (error) {
@@ -615,9 +698,10 @@ export default function App() {
     setTitleInput("");
     setDescInput("");
     setRewardInput("10");
+    setDeadlineInput("");
     setEditingTaskId(null);
     setEditTaskSheet(false);
-  }, [editingTaskId, titleInput, descInput, rewardInput, screen, activeAddress, refreshAll]);
+  }, [editingTaskId, titleInput, descInput, rewardInput, deadlineInput, screen, activeAddress, refreshAll]);
 
   const deleteTask = useCallback(
     async (task) => {
@@ -635,16 +719,24 @@ export default function App() {
     [activeAddress, refreshAll]
   );
 
+  // jumps straight from the Wallet/Home quick-access list into a task's screen
+  const goToTask = useCallback((task) => {
+    setTab("projects");
+    setScreen({ name: "task", projectId: task.projectId, taskId: task.id });
+  }, []);
+
   const submitSolution = useCallback(
     async (taskId) => {
-      if (!activeAddress || !solutionInput.trim()) return;
+      const cleanText = sanitizeHtml(solutionInput);
+      if (!activeAddress || !hasVisibleText(cleanText)) return;
       const identity = identities.find((i) => i.address === activeAddress);
       if (!identity) return;
       const task = tasks.find((t) => t.id === taskId);
       const payload = {
         taskId,
         address: activeAddress,
-        text: solutionInput.trim(),
+        text: cleanText,
+        attachmentUrl: attachmentInput.trim() || null,
         submittedAt: Date.now(),
       };
       const signature = await signPayload(identity.privateJwk, payload);
@@ -658,9 +750,10 @@ export default function App() {
         return;
       }
       setSolutionInput("");
+      setAttachmentInput("");
       setSubmitSheet(false);
     },
-    [activeAddress, solutionInput, identities, tasks, refreshAll]
+    [activeAddress, solutionInput, attachmentInput, identities, tasks, refreshAll]
   );
 
   const castVote = useCallback(
@@ -743,6 +836,7 @@ export default function App() {
         * { box-sizing: border-box; }
         body { margin: 0; }
         ::placeholder { color: ${COLORS.textDim}; opacity: 0.7; }
+        [contenteditable][data-placeholder]:empty:before { content: attr(data-placeholder); color: ${COLORS.textDim}; opacity: 0.7; }
         @keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
       `}</style>
@@ -805,6 +899,11 @@ export default function App() {
             activeAddress={activeAddress}
             setActiveAddress={setActiveAddress}
             onNewIdentity={() => setNewIdentitySheet(true)}
+            tasks={tasks}
+            projects={projects}
+            chain={chain}
+            onOpenTask={goToTask}
+            onSeeAllActivity={() => setTab("activity")}
           />
         )}
 
@@ -1012,6 +1111,9 @@ export default function App() {
             onChange={(e) => setRewardInput(e.target.value)}
           />
         </Field>
+        <Field label="дедлайн (необязательно)">
+          <input style={inputStyle} type="date" value={deadlineInput} onChange={(e) => setDeadlineInput(e.target.value)} />
+        </Field>
         <PrimaryButton onClick={createTask} disabled={!titleInput.trim()}>
           Добавить задачу
         </PrimaryButton>
@@ -1046,23 +1148,43 @@ export default function App() {
             onChange={(e) => setRewardInput(e.target.value)}
           />
         </Field>
+        <Field label="дедлайн (необязательно)">
+          <input style={inputStyle} type="date" value={deadlineInput} onChange={(e) => setDeadlineInput(e.target.value)} />
+        </Field>
         <PrimaryButton onClick={updateTask} disabled={!titleInput.trim()}>
           Сохранить изменения
         </PrimaryButton>
       </Sheet>
 
       {/* submit solution sheet */}
-      <Sheet open={submitSheet} onClose={() => setSubmitSheet(false)} title="Отправить решение">
-        <Field label="что сделано / ссылка / описание результата">
-          <textarea
-            style={{ ...inputStyle, minHeight: 100, resize: "vertical" }}
-            value={solutionInput}
-            onChange={(e) => setSolutionInput(e.target.value)}
+      <Sheet
+        open={submitSheet}
+        onClose={() => {
+          setSubmitSheet(false);
+          setSolutionInput("");
+          setAttachmentInput("");
+        }}
+        title="Отправить решение"
+      >
+        <Field label="что сделано — форматирование при вставке сохраняется">
+          <RichTextInput
+            onChange={setSolutionInput}
             placeholder="Опиши результат — участники проекта проголосуют"
-            autoFocus
           />
         </Field>
-        <PrimaryButton onClick={() => currentTask && submitSolution(currentTask.id)} disabled={!solutionInput.trim()}>
+        <Field label="ссылка на файл / материал (необязательно)">
+          <input
+            style={inputStyle}
+            type="url"
+            value={attachmentInput}
+            onChange={(e) => setAttachmentInput(e.target.value)}
+            placeholder="https://…"
+          />
+        </Field>
+        <PrimaryButton
+          onClick={() => currentTask && submitSolution(currentTask.id)}
+          disabled={!hasVisibleText(solutionInput)}
+        >
           Отправить на голосование
         </PrimaryButton>
       </Sheet>
@@ -1081,49 +1203,169 @@ const appShellStyle = {
 };
 
 // ---------- Wallet tab ----------
-function WalletTab({ identities, balances, activeAddress, setActiveAddress, onNewIdentity }) {
+function WalletTab({
+  identities,
+  balances,
+  activeAddress,
+  setActiveAddress,
+  onNewIdentity,
+  tasks,
+  projects,
+  chain,
+  onOpenTask,
+  onSeeAllActivity,
+}) {
+  const activeIdentity = identities.find((i) => i.address === activeAddress) || null;
+
+  const recentEarnings = useMemo(() => {
+    if (!activeAddress) return [];
+    const entries = [];
+    chain.forEach((b) => {
+      (b.events || []).forEach((e) => {
+        if (e.type === "reward" && e.to === activeAddress) {
+          entries.push({ key: b.hash + e.taskId, amount: e.amount, taskId: e.taskId, timestamp: b.timestamp });
+        }
+      });
+    });
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    return entries.slice(0, 3);
+  }, [chain, activeAddress]);
+
+  const myTasks = useMemo(() => {
+    if (!activeAddress) return [];
+    const myProjectIds = new Set(projects.filter((p) => p.participants.includes(activeAddress)).map((p) => p.id));
+    const items = [];
+    tasks.forEach((t) => {
+      if (!myProjectIds.has(t.projectId)) return;
+      if (t.status === "open") {
+        items.push({ task: t, reason: "Открыта — можно взяться" });
+      } else if (t.status === "submitted") {
+        const isSubmitter = t.submission && t.submission.address === activeAddress;
+        const alreadyVoted = t.votes.some((v) => v.address === activeAddress);
+        if (isSubmitter) items.push({ task: t, reason: "Твоё решение — ждёт голосов" });
+        else if (!alreadyVoted) items.push({ task: t, reason: "Ждёт твоего голоса" });
+      }
+    });
+    return items.slice(0, 5);
+  }, [tasks, projects, activeAddress]);
+
+  const titleFor = (taskId) => tasks.find((t) => t.id === taskId)?.title || "задача";
+
   return (
     <div>
-      <SectionTitle>Личности на устройстве</SectionTitle>
-      {identities.length === 0 && (
-        <EmptyState
-          icon={Wallet}
-          text="Пока нет ни одной личности. Создай первую — она станет твоим адресом для наград."
-        />
-      )}
-      {identities.map((id) => (
-        <div
-          key={id.address}
-          onClick={() => setActiveAddress(id.address)}
-          style={{
-            ...cardStyle,
-            borderColor: id.address === activeAddress ? COLORS.gold : COLORS.border,
-            marginBottom: 10,
-            cursor: "pointer",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 15 }}>{id.name}</div>
-              <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>
-                {shortAddr(id.address)}
-              </div>
+      {activeIdentity ? (
+        <>
+          <div
+            style={{
+              ...cardStyle,
+              marginBottom: 18,
+              background: "linear-gradient(135deg, rgba(42,171,238,0.16), rgba(42,171,238,0.04))",
+              border: `1px solid rgba(42,171,238,0.3)`,
+            }}
+          >
+            <div style={{ fontSize: 12, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace" }}>
+              {activeIdentity.name}
             </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 16 }}>
-                {balances[id.address] || 0}
-              </div>
-              <div style={{ fontSize: 10, color: COLORS.textDim }}>монет</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
+              <span style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Roboto Mono',monospace", color: COLORS.text }}>
+                {balances[activeAddress] || 0}
+              </span>
+              <span style={{ fontSize: 13, color: COLORS.textDim }}>монет</span>
             </div>
           </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <SectionTitle>Последние начисления</SectionTitle>
+            {recentEarnings.length > 0 && (
+              <button
+                onClick={onSeeAllActivity}
+                style={{ background: "transparent", border: "none", color: COLORS.gold, fontSize: 11.5, fontFamily: "'Inter',sans-serif" }}
+              >
+                Вся активность →
+              </button>
+            )}
+          </div>
+          {recentEarnings.length === 0 ? (
+            <EmptyState icon={Coins} text="Пока нет начислений — реши задачу, чтобы получить первые монеты." />
+          ) : (
+            recentEarnings.map((entry) => (
+              <div key={entry.key} style={{ ...cardStyle, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+                <Coins size={16} color={COLORS.gold} style={{ flexShrink: 0 }} />
+                <div style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>«{titleFor(entry.taskId)}»</div>
+                <div style={{ color: COLORS.sage, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 14 }}>
+                  +{entry.amount}
+                </div>
+              </div>
+            ))
+          )}
+
+          {myTasks.length > 0 && (
+            <div style={{ marginTop: 22 }}>
+              <SectionTitle>Мои задачи</SectionTitle>
+              {myTasks.map(({ task, reason }) => (
+                <div
+                  key={task.id}
+                  onClick={() => onOpenTask(task)}
+                  style={{ ...cardStyle, marginBottom: 8, cursor: "pointer" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{task.title}</div>
+                      <div style={{ fontSize: 11.5, color: COLORS.gold, marginTop: 3 }}>{reason}</div>
+                    </div>
+                    <ChevronRight size={16} color={COLORS.textDim} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <EmptyState icon={Wallet} text="Создай личность, чтобы увидеть баланс и свои задачи." />
+      )}
+
+      <div style={{ marginTop: 26 }}>
+        <SectionTitle>Личности на устройстве</SectionTitle>
+        {identities.length === 0 && (
+          <EmptyState
+            icon={Wallet}
+            text="Пока нет ни одной личности. Создай первую — она станет твоим адресом для наград."
+          />
+        )}
+        {identities.map((id) => (
+          <div
+            key={id.address}
+            onClick={() => setActiveAddress(id.address)}
+            style={{
+              ...cardStyle,
+              borderColor: id.address === activeAddress ? COLORS.gold : COLORS.border,
+              marginBottom: 10,
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>{id.name}</div>
+                <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>
+                  {shortAddr(id.address)}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 16 }}>
+                  {balances[id.address] || 0}
+                </div>
+                <div style={{ fontSize: 10, color: COLORS.textDim }}>монет</div>
+              </div>
+            </div>
+          </div>
+        ))}
+        <div style={{ marginTop: 16 }}>
+          <PrimaryButton onClick={onNewIdentity}>
+            <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              <Plus size={16} /> Новая личность
+            </span>
+          </PrimaryButton>
         </div>
-      ))}
-      <div style={{ marginTop: 16 }}>
-        <PrimaryButton onClick={onNewIdentity}>
-          <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-            <Plus size={16} /> Новая личность
-          </span>
-        </PrimaryButton>
       </div>
     </div>
   );
@@ -1186,6 +1428,25 @@ function MiniStat({ icon: Icon, value }) {
 function ProjectDetail({ project, tasksList, activeAddress, identities, activityLog, onBack, onJoin, onNewTask, onOpenTask }) {
   const isParticipant = activeAddress && project.participants.includes(activeAddress);
   const nameFor = (addr) => identities.find((i) => i.address === addr)?.name || shortAddr(addr);
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [sortBy, setSortBy] = useState("created");
+
+  const visibleTasks = useMemo(() => {
+    let list = tasksList;
+    if (filterStatus !== "all") list = list.filter((t) => t.status === filterStatus);
+    list = [...list];
+    if (sortBy === "deadline") {
+      list.sort((a, b) => {
+        if (a.deadline == null && b.deadline == null) return b.createdAt - a.createdAt;
+        if (a.deadline == null) return 1; // no-deadline tasks sink to the bottom
+        if (b.deadline == null) return -1;
+        return a.deadline - b.deadline;
+      });
+    } else {
+      list.sort((a, b) => b.createdAt - a.createdAt);
+    }
+    return list;
+  }, [tasksList, filterStatus, sortBy]);
 
   const actionLabel = (entry) => {
     const d = entry.details || {};
@@ -1242,17 +1503,75 @@ function ProjectDetail({ project, tasksList, activeAddress, identities, activity
 
       <div style={{ marginTop: 22 }}>
         <SectionTitle>Задачи</SectionTitle>
-        {tasksList.length === 0 && <EmptyState icon={ListChecks} text="Задач пока нет." />}
-        {tasksList.map((t) => (
+
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", marginBottom: 10, paddingBottom: 2 }}>
+          {[
+            { key: "all", label: "Все" },
+            { key: "open", label: "Открыты" },
+            { key: "submitted", label: "На голосовании" },
+            { key: "approved", label: "Принятые" },
+          ].map((f) => (
+            <button
+              key={f.key}
+              onClick={() => setFilterStatus(f.key)}
+              style={{
+                flexShrink: 0,
+                background: filterStatus === f.key ? COLORS.gold : "transparent",
+                color: filterStatus === f.key ? COLORS.ink : COLORS.textDim,
+                border: `1px solid ${filterStatus === f.key ? COLORS.gold : COLORS.border}`,
+                borderRadius: 999,
+                padding: "5px 12px",
+                fontSize: 12,
+                fontFamily: "'Inter',sans-serif",
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+          {[
+            { key: "created", label: "По дате добавления" },
+            { key: "deadline", label: "По дедлайну" },
+          ].map((s) => (
+            <button
+              key={s.key}
+              onClick={() => setSortBy(s.key)}
+              style={{
+                background: "transparent",
+                color: sortBy === s.key ? COLORS.gold : COLORS.textDim,
+                border: "none",
+                padding: "2px 0",
+                fontSize: 11.5,
+                fontFamily: "'Roboto Mono',monospace",
+                textDecoration: sortBy === s.key ? "underline" : "none",
+                marginRight: 14,
+              }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {visibleTasks.length === 0 && <EmptyState icon={ListChecks} text="Задач с таким фильтром нет." />}
+        {visibleTasks.map((t) => (
           <div key={t.id} onClick={() => onOpenTask(t.id)} style={{ ...cardStyle, marginBottom: 10, cursor: "pointer" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14.5 }}>{t.title}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
                   <Badge status={t.status} />
                   <span style={{ display: "flex", alignItems: "center", gap: 3, color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontSize: 12 }}>
                     <Coins size={12} /> {t.reward}
                   </span>
+                  {t.deadline && (
+                    <span style={{ display: "flex", alignItems: "center", gap: 3, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", fontSize: 11.5 }}>
+                      <CalendarClock size={12} /> {new Date(t.deadline).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}
+                    </span>
+                  )}
                 </div>
               </div>
               <ChevronRight size={17} color={COLORS.textDim} />
@@ -1338,6 +1657,11 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
       <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 10, color: COLORS.gold, fontFamily: "'Roboto Mono',monospace", fontSize: 13 }}>
         <Coins size={14} /> награда: {task.reward} монет
       </div>
+      {task.deadline && (
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 6, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", fontSize: 12.5 }}>
+          <CalendarClock size={13} /> дедлайн: {new Date(task.deadline).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" })}
+        </div>
+      )}
 
       {isOwner && task.status === "open" && (
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -1402,7 +1726,30 @@ function TaskDetail({ task, project, identities, activeAddress, onBack, onSubmit
             решение от {nameFor(task.submission.address)} · {fmtTime(task.submission.submittedAt)}
             <SigBadge valid={sigValid["submission:" + task.submission.address]} />
           </div>
-          <div style={{ ...cardStyle, background: COLORS.surfaceRaised }}>{task.submission.text}</div>
+          <div
+            style={{ ...cardStyle, background: COLORS.surfaceRaised, lineHeight: 1.5 }}
+            dangerouslySetInnerHTML={{ __html: sanitizeHtml(task.submission.text) }}
+          />
+          {task.submission.attachmentUrl && (
+            <a
+              href={task.submission.attachmentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                marginTop: 10,
+                color: COLORS.gold,
+                fontSize: 13,
+                fontFamily: "'Inter',sans-serif",
+                fontWeight: 500,
+                textDecoration: "none",
+              }}
+            >
+              <Paperclip size={14} /> Открыть вложение
+            </a>
+          )}
 
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, marginBottom: 10 }}>
             <span style={{ fontSize: 12, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace" }}>
@@ -1517,11 +1864,14 @@ function ActivityTab({ chain, tasks, identities, activeAddress }) {
   }
 
   const entries = [];
+
+  // coins earned — task approved and rewarded
   chain.forEach((b) => {
     (b.events || []).forEach((e) => {
       if (e.type === "reward" && e.to === activeAddress) {
         entries.push({
-          key: b.hash + e.taskId,
+          key: "reward:" + b.hash + e.taskId,
+          kind: "reward",
           amount: e.amount,
           taskId: e.taskId,
           timestamp: b.timestamp,
@@ -1529,6 +1879,22 @@ function ActivityTab({ chain, tasks, identities, activeAddress }) {
       }
     });
   });
+
+  // votes cast on other people's submissions
+  tasks.forEach((t) => {
+    t.votes.forEach((v) => {
+      if (v.address === activeAddress) {
+        entries.push({
+          key: "vote:" + t.id + v.votedAt,
+          kind: "vote",
+          approve: v.approve,
+          taskId: t.id,
+          timestamp: v.votedAt,
+        });
+      }
+    });
+  });
+
   entries.sort((a, b) => b.timestamp - a.timestamp);
 
   return (
@@ -1536,11 +1902,11 @@ function ActivityTab({ chain, tasks, identities, activeAddress }) {
       <SectionTitle>Активность</SectionTitle>
       <div style={{ ...cardStyle, marginBottom: 16 }}>
         <div style={{ fontSize: 12.5, color: COLORS.textDim }}>
-          Все начисления монет, полученные личностью «{nameFor(activeAddress)}».
+          Всё, что сделала личность «{nameFor(activeAddress)}»: решённые задачи, полученные монеты, поданные голоса.
         </div>
       </div>
       {entries.length === 0 && (
-        <EmptyState icon={History} text="Пока пусто — здесь появятся монеты за принятые задачи." />
+        <EmptyState icon={History} text="Пока пусто — реши задачу или проголосуй, чтобы здесь что-то появилось." />
       )}
       {entries.map((entry) => (
         <div
@@ -1558,24 +1924,39 @@ function ActivityTab({ chain, tasks, identities, activeAddress }) {
               width: 34,
               height: 34,
               borderRadius: 999,
-              background: "rgba(42,171,238,0.12)",
+              background:
+                entry.kind === "reward"
+                  ? "rgba(42,171,238,0.12)"
+                  : entry.approve
+                  ? "rgba(79,174,78,0.12)"
+                  : "rgba(224,83,83,0.12)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               flexShrink: 0,
             }}
           >
-            <Coins size={16} color={COLORS.gold} />
+            {entry.kind === "reward" ? (
+              <Coins size={16} color={COLORS.gold} />
+            ) : entry.approve ? (
+              <ThumbsUp size={15} color={COLORS.sage} />
+            ) : (
+              <ThumbsDown size={15} color={COLORS.rust} />
+            )}
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600 }}>«{titleFor(entry.taskId)}»</div>
             <div style={{ fontSize: 11.5, color: COLORS.textDim, fontFamily: "'Roboto Mono',monospace", marginTop: 2 }}>
+              {entry.kind === "reward" ? "принята, начислена награда" : entry.approve ? "проголосовал(а) «за»" : "проголосовал(а) «против»"}
+              {" · "}
               {fmtTime(entry.timestamp)}
             </div>
           </div>
-          <div style={{ color: COLORS.sage, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 15 }}>
-            +{entry.amount}
-          </div>
+          {entry.kind === "reward" && (
+            <div style={{ color: COLORS.sage, fontFamily: "'Roboto Mono',monospace", fontWeight: 600, fontSize: 15 }}>
+              +{entry.amount}
+            </div>
+          )}
         </div>
       ))}
     </div>
