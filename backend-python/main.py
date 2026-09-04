@@ -117,6 +117,7 @@ class SubmitSolutionBody(BaseModel):
     taskId: str
     address: str
     text: str
+    attachmentUrl: Optional[str] = None
     submittedAt: int
     signature: str
 
@@ -137,6 +138,7 @@ def submit_solution(body: SubmitSolutionBody):
         "taskId": body.taskId,
         "address": body.address,
         "text": body.text,
+        "attachmentUrl": body.attachmentUrl,
         "submittedAt": body.submittedAt,
     }
     if not verify_payload(body.address, payload, body.signature):
@@ -167,6 +169,7 @@ def submit_solution(body: SubmitSolutionBody):
                 "task_id": body.taskId,
                 "address": body.address,
                 "text_body": body.text,
+                "attachment_url": body.attachmentUrl,
                 "submitted_at": body.submittedAt,
                 "signature": body.signature,
                 "is_active": True,
@@ -267,6 +270,7 @@ def cast_vote(body: CastVoteBody):
                     "taskId": body.taskId,
                     "address": submission["address"],
                     "text": submission["text_body"],
+                    "attachmentUrl": submission.get("attachment_url"),
                     "submittedAt": submission["submitted_at"],
                     "signature": submission["signature"],
                 },
